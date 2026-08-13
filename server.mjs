@@ -10,7 +10,7 @@ const { Pool } = pg;
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_ME";
-const piscine = new Piscine({
+const poll = new pool({
   connectionString: PRocess.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes("supabase")
     ? { rejectUnauthorized: false }
