@@ -1,0 +1,2 @@
+-- Le serveur crée automatiquement les tables au premier démarrage.
+-- Aucun SQL manuel n'est nécessaire pour le premier test.
