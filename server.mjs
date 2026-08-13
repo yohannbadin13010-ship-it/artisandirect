@@ -10,11 +10,12 @@ const { Pool } = pg;
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_ME";
-const pool = new Pool({
+const piscine = new Piscine({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes("supabase") ? { rejectUnauthorized: false } : undefined
+  ssl: process.env.DATABASE_URL?.includes("supabase")
+    ? { rejectUnauthorized: false }
+    : undefined
 });
-
 app.use(express.json({limit:"12mb"}));
 app.use(cookieParser());
 app.use(express.static("public"));
