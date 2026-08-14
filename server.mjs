@@ -11,7 +11,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_ME";
 const poll = new Pool({
-  connectionString: PRocess.env.DATABASE_URL,
+  connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes("supabase")
     ? { rejectUnauthorized: false }
     : undefined
