@@ -180,4 +180,4 @@ app.post("/api/analyze",async(req,res)=>{
 });
 app.get("/health",(req,res)=>res.json({ok:true,app:"ARTISANDIRECT",version:"11.0"}));
 
-initDb().then(()=>app.listen(PORT,()=>console.log(`ARTISANDIRECT V11 http://localhost:${PORT}`))).catch(e=>{console.error(e);process.exit(1)});
+initDb().then(()=>app.listen(PORT,"0.0.0.0",()=>console.log("ARTISANDIRECT V11 http://0.0.0.0:"+PORT)));
