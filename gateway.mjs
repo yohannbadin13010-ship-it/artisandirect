@@ -1,0 +1,130 @@
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import jwt from 'jsonwebtoken';
+import pg from 'pg';
+import 'dotenv/config';
+
+const PUBLIC_PORT = Number(process.env.PORT || 3000);
+const INTERNAL_PORT = Number(process.env.INTERNAL_PORT || 3001);
+const JWT_SECRET = process.env.JWT_SECRET || 'CHANGE_ME';
+const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || '').toLowerCase().trim();
+const { Pool } = pg;
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('supabase') ? { rejectUnauthorized: false } : undefined });
+const q = (text, params=[]) => pool.query(text, params);
+
+async function initVerificationDb() {
+  await q(`CREATE TABLE IF NOT EXISTS artisan_verification_requests (
+    id BIGSERIAL PRIMARY KEY,
+    artisan_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','auto_approved','manual_review','rejected','needs_documents')),
+    confidence NUMERIC(5,2) DEFAULT 0,
+    identity_status TEXT NOT NULL DEFAULT 'not_submitted',
+    business_status TEXT NOT NULL DEFAULT 'not_submitted',
+    qualification_status TEXT NOT NULL DEFAULT 'not_submitted',
+    insurance_status TEXT NOT NULL DEFAULT 'not_submitted',
+    admin_note TEXT NOT NULL DEFAULT '',
+    decision_reason TEXT NOT NULL DEFAULT '',
+    submitted_at TIMESTAMPTZ DEFAULT now(),
+    reviewed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now()
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS artisan_verification_requests_status_idx ON artisan_verification_requests(status)`);
+  await q(`CREATE INDEX IF NOT EXISTS artisan_verification_requests_artisan_idx ON artisan_verification_requests(artisan_id)`);
+}
+
+function cookie(req,name){ const raw=req.headers.cookie||''; const m=raw.match(new RegExp('(?:^|;\\s*)'+name.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')+'=([^;]*)')); return m?decodeURIComponent(m[1]):''; }
+function userFromRequest(req){ try { const token=cookie(req,'ad_token'); return token?jwt.verify(token,JWT_SECRET):null; } catch { return null; } }
+async function currentUser(req){ const t=userFromRequest(req); if(!t?.id)return null; return (await q('SELECT id,role,name,email FROM users WHERE id=$1',[t.id])).rows[0]||null; }
+async function requireArtisan(req,res){ const u=await currentUser(req); if(!u)return nullResponse(res,401,'Connexion requise'); if(u.role!=='artisan')return nullResponse(res,403,'Réservé aux artisans'); return u; }
+async function requireAdmin(req,res){ const u=await currentUser(req); if(!u)return nullResponse(res,401,'Connexion requise'); if(!ADMIN_EMAIL || String(u.email).toLowerCase()!==ADMIN_EMAIL)return nullResponse(res,403,'Accès administrateur refusé'); return u; }
+function nullResponse(res,status,error){ json(res,status,{error}); return null; }
+function json(res,status,data){ const body=JSON.stringify(data); res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}); res.end(body); }
+function parseBody(req){ return new Promise((resolve,reject)=>{let b='';req.on('data',c=>{b+=c;if(b.length>200000)reject(new Error('Payload trop volumineux'))});req.on('end',()=>{try{resolve(b?JSON.parse(b):{})}catch{reject(new Error('JSON invalide'))}});req.on('error',reject)}); }
+
+function calculateConfidence(v){
+  const states=[v.identity_status,v.business_status,v.qualification_status,v.insurance_status];
+  const weights={verified:100,pending:50,not_submitted:0,invalid:0,expired:20};
+  const scores=states.map(s=>weights[s]??0);
+  const submitted=states.filter(s=>s!=='not_submitted').length;
+  if(!submitted)return 0;
+  const avg=scores.reduce((a,b)=>a+b,0)/states.length;
+  return Math.round(avg*100)/100;
+}
+function decide(confidence, v){
+  const allVerified=[v.identity_status,v.business_status,v.qualification_status,v.insurance_status].every(s=>s==='verified' || s==='not_required');
+  const hasInvalid=[v.identity_status,v.business_status,v.qualification_status,v.insurance_status].some(s=>s==='invalid');
+  if(hasInvalid || confidence<60)return {status:'needs_documents',reason:'Des justificatifs complémentaires sont nécessaires.'};
+  if(allVerified && confidence>=90)return {status:'auto_approved',reason:'Contrôles automatiques conformes.'};
+  return {status:'manual_review',reason:'Le dossier nécessite un contrôle humain.'};
+}
+
+async function handleVerification(req,res,url){
+  if(req.method==='GET' && url.pathname==='/api/verification/me'){
+    const u=await requireArtisan(req,res); if(!u)return;
+    const r=(await q(`SELECT id,status,confidence,identity_status,business_status,qualification_status,insurance_status,admin_note,decision_reason,submitted_at,reviewed_at,updated_at FROM artisan_verification_requests WHERE artisan_id=$1 ORDER BY created_at DESC LIMIT 1`,[u.id])).rows[0]||null;
+    return json(res,200,{request:r});
+  }
+  if(req.method==='POST' && url.pathname==='/api/verification'){
+    const u=await requireArtisan(req,res); if(!u)return;
+    const body=await parseBody(req);
+    const existing=(await q(`SELECT * FROM artisan_verification_requests WHERE artisan_id=$1 AND status IN ('pending','manual_review') ORDER BY created_at DESC LIMIT 1`,[u.id])).rows[0];
+    if(existing)return json(res,409,{error:'Une demande de vérification est déjà en cours.',request:existing});
+    const v={identity_status:body.identity_status||'not_submitted',business_status:body.business_status||'not_submitted',qualification_status:body.qualification_status||'not_submitted',insurance_status:body.insurance_status||'not_submitted'};
+    const confidence=calculateConfidence(v); const decision=decide(confidence,v);
+    const r=(await q(`INSERT INTO artisan_verification_requests(artisan_id,status,confidence,identity_status,business_status,qualification_status,insurance_status,decision_reason,reviewed_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()) RETURNING *`,[u.id,decision.status,confidence,v.identity_status,v.business_status,v.qualification_status,v.insurance_status,decision.reason,decision.status==='auto_approved'?new Date():null])).rows[0];
+    if(decision.status==='auto_approved')await q(`UPDATE artisan_profiles SET verified=true WHERE user_id=$1`,[u.id]);
+    return json(res,201,{request:r});
+  }
+  return false;
+}
+
+async function handleAdmin(req,res,url){
+  if(url.pathname==='/api/admin/verifications' && req.method==='GET'){
+    const u=await requireAdmin(req,res); if(!u)return;
+    const status=url.searchParams.get('status');
+    const params=[]; let where='';
+    if(status){params.push(status);where='WHERE v.status=$1';}
+    const rows=(await q(`SELECT v.*,u.name artisan_name,u.email artisan_email,u.city artisan_city,p.trade,p.verified FROM artisan_verification_requests v JOIN users u ON u.id=v.artisan_id LEFT JOIN artisan_profiles p ON p.user_id=v.artisan_id ${where} ORDER BY CASE v.status WHEN 'manual_review' THEN 0 WHEN 'pending' THEN 1 WHEN 'needs_documents' THEN 2 WHEN 'auto_approved' THEN 3 ELSE 4 END,v.created_at DESC`,params)).rows;
+    return json(res,200,{items:rows});
+  }
+  const m=url.pathname.match(/^\/api\/admin\/verifications\/(\d+)\/decision$/);
+  if(m && req.method==='POST'){
+    const u=await requireAdmin(req,res); if(!u)return;
+    const body=await parseBody(req); const id=Number(m[1]);
+    if(!['approved','rejected','needs_documents','manual_review'].includes(body.decision))return json(res,400,{error:'Décision invalide'});
+    const map={approved:'auto_approved',rejected:'rejected',needs_documents:'needs_documents',manual_review:'manual_review'};
+    const status=map[body.decision];
+    const r=(await q(`UPDATE artisan_verification_requests SET status=$1,admin_note=$2,decision_reason=$3,reviewed_at=now(),updated_at=now() WHERE id=$4 RETURNING *`,[status,String(body.note||''),String(body.reason||''),id])).rows[0];
+    if(!r)return json(res,404,{error:'Dossier introuvable'});
+    await q(`UPDATE artisan_profiles SET verified=$1 WHERE user_id=$2`,[status==='auto_approved',r.artisan_id]);
+    return json(res,200,{request:r});
+  }
+  return false;
+}
+
+function proxy(req,res){
+  const headers={...req.headers,host:`127.0.0.1:${INTERNAL_PORT}`};
+  const p=http.request({hostname:'127.0.0.1',port:INTERNAL_PORT,path:req.url,method:req.method,headers},r=>{res.writeHead(r.statusCode||502,r.headers);r.pipe(res)});
+  p.on('error',()=>{if(!res.headersSent)json(res,502,{error:'Service indisponible'});else res.end()});
+  req.pipe(p);
+}
+
+await initVerificationDb();
+const child=spawn(process.execPath,['server.mjs'],{env:{...process.env,PORT:String(INTERNAL_PORT)},stdio:'inherit'});
+child.on('exit',code=>{console.error('Backend arrêté:',code);process.exit(code??1)});
+
+const server=http.createServer(async(req,res)=>{
+  try{
+    const url=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
+    if(url.pathname.startsWith('/api/verification')||url.pathname.startsWith('/api/admin/verifications')){
+      const handled=url.pathname.startsWith('/api/admin/verifications')?await handleAdmin(req,res,url):await handleVerification(req,res,url);
+      if(handled!==false)return;
+    }
+    proxy(req,res);
+  }catch(e){console.error(e);if(!res.headersSent)json(res,500,{error:'Erreur serveur'});}
+});
+server.listen(PUBLIC_PORT,'0.0.0.0',()=>console.log(`ARTISANDIRECT gateway listening on ${PUBLIC_PORT}; backend on ${INTERNAL_PORT}`));
+process.on('SIGTERM',()=>{child.kill('SIGTERM');server.close(()=>process.exit(0))});
+process.on('SIGINT',()=>{child.kill('SIGINT');server.close(()=>process.exit(0))});
