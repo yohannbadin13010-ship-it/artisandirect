@@ -4,7 +4,8 @@ import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import 'dotenv/config';
 
-const PUBLIC_PORT=Number(process.env.PORT||3000), INTERNAL_PORT=Number(process.env.INTERNAL_PORT||3001), JWT_SECRET=process.env.JWT_SECRET||'CHANGE_ME';
+const PUBLIC_PORT=Number(process.env.PORT||3000), INTERNAL_PORT=Number(process.env.INTERNAL_PORT||3001), JWT_SECRET=String(process.env.JWT_SECRET||'').trim();
+if(!JWT_SECRET||JWT_SECRET.length<32){console.error('FATAL: JWT_SECRET must be configured and contain at least 32 characters.');process.exit(1)}
 const ADMIN_EMAIL=String(process.env.ADMIN_EMAIL||'').toLowerCase().trim();
 const {Pool}=pg; const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_URL?.includes('supabase')?{rejectUnauthorized:false}:undefined}); const q=(text,params=[])=>pool.query(text,params);
 
