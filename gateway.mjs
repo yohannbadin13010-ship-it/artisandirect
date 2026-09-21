@@ -2,15 +2,18 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
+import Stripe from 'stripe';
 import 'dotenv/config';
 
 const PUBLIC_PORT=Number(process.env.PORT||3000), INTERNAL_PORT=Number(process.env.INTERNAL_PORT||3001), JWT_SECRET=String(process.env.JWT_SECRET||'').trim();
 if(!JWT_SECRET||JWT_SECRET.length<32){console.error('FATAL: JWT_SECRET must be configured and contain at least 32 characters.');process.exit(1)}
 const ADMIN_EMAIL=String(process.env.ADMIN_EMAIL||'').toLowerCase().trim();
+const STRIPE_SECRET_KEY=String(process.env.STRIPE_SECRET_KEY||'').trim();
+const stripe=STRIPE_SECRET_KEY?new Stripe(STRIPE_SECRET_KEY):null;
 const {Pool}=pg; const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_URL?.includes('supabase')?{rejectUnauthorized:false}:undefined}); const q=(text,params=[])=>pool.query(text,params);
 
 async function initVerificationDb(){await q(`CREATE TABLE IF NOT EXISTS artisan_verification_requests(id BIGSERIAL PRIMARY KEY,artisan_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','auto_approved','manual_review','rejected','needs_documents')),confidence NUMERIC(5,2) DEFAULT 0,identity_status TEXT NOT NULL DEFAULT 'not_submitted',business_status TEXT NOT NULL DEFAULT 'not_submitted',qualification_status TEXT NOT NULL DEFAULT 'not_submitted',insurance_status TEXT NOT NULL DEFAULT 'not_submitted',admin_note TEXT NOT NULL DEFAULT '',decision_reason TEXT NOT NULL DEFAULT '',submitted_at TIMESTAMPTZ DEFAULT now(),reviewed_at TIMESTAMPTZ,updated_at TIMESTAMPTZ DEFAULT now(),created_at TIMESTAMPTZ DEFAULT now())`);await q(`ALTER TABLE artisan_verification_requests ADD COLUMN IF NOT EXISTS decision_reason text NOT NULL DEFAULT ''`);await q(`ALTER TABLE artisan_verification_requests ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now()`);await q(`CREATE INDEX IF NOT EXISTS artisan_verification_requests_status_idx ON artisan_verification_requests(status)`);await q(`CREATE INDEX IF NOT EXISTS artisan_verification_requests_artisan_idx ON artisan_verification_requests(artisan_id)`)}
-async function initQuoteDb(){await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_amount_cents INTEGER`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_description TEXT DEFAULT ''`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_status TEXT DEFAULT 'none'`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_created_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_expires_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_accepted_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_declined_at TIMESTAMPTZ`)}
+async function initQuoteDb(){await q(`ALTER TABLE artisan_profiles ADD COLUMN IF NOT EXISTS stripe_account_id TEXT`);await q(`ALTER TABLE artisan_profiles ADD COLUMN IF NOT EXISTS stripe_onboarding_status TEXT DEFAULT 'not_started'`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_amount_cents INTEGER`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_description TEXT DEFAULT ''`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_status TEXT DEFAULT 'none'`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_created_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_expires_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_accepted_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_declined_at TIMESTAMPTZ`)}
 function cookie(req,name){const raw=req.headers.cookie||'';const m=raw.match(new RegExp('(?:^|;\\s*)'+name.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')+'=([^;]*)'));return m?decodeURIComponent(m[1]):''}
 function userFromRequest(req){try{const t=cookie(req,'ad_token');return t?jwt.verify(t,JWT_SECRET):null}catch{return null}}
 async function currentUser(req){const t=userFromRequest(req);if(!t?.id)return null;return (await q('SELECT id,role,name,email FROM users WHERE id=$1',[t.id])).rows[0]||null}
@@ -28,6 +31,28 @@ async function verification(req,res,url){
 async function admin(req,res,url){
  if(url.pathname==='/api/admin/verifications'&&req.method==='GET'){const u=await requireAdmin(req,res);if(!u)return;const status=url.searchParams.get('status'),params=[];let where='';if(status){params.push(status);where='WHERE v.status=$1'}const rows=(await q(`SELECT v.*,u.name artisan_name,u.email artisan_email,u.city artisan_city,p.trade,p.verified FROM artisan_verification_requests v JOIN users u ON u.id=v.artisan_id LEFT JOIN artisan_profiles p ON p.user_id=v.artisan_id ${where} ORDER BY CASE v.status WHEN 'manual_review' THEN 0 WHEN 'pending' THEN 1 WHEN 'needs_documents' THEN 2 WHEN 'auto_approved' THEN 3 ELSE 4 END,v.created_at DESC`,params)).rows;return json(res,200,{items:rows})}
  const m=url.pathname.match(/^\/api\/admin\/verifications\/(\d+)\/decision$/);if(m&&req.method==='POST'){const u=await requireAdmin(req,res);if(!u)return;const body=await parseBody(req),id=Number(m[1]);if(!['approved','rejected','needs_documents','manual_review'].includes(body.decision))return json(res,400,{error:'Décision invalide'});const map={approved:'auto_approved',rejected:'rejected',needs_documents:'needs_documents',manual_review:'manual_review'},status=map[body.decision];const r=(await q(`UPDATE artisan_verification_requests SET status=$1,admin_note=$2,decision_reason=$3,reviewed_at=now(),updated_at=now() WHERE id=$4 RETURNING *`,[status,String(body.note||''),String(body.reason||''),id])).rows[0];if(!r)return json(res,404,{error:'Dossier introuvable'});await q('UPDATE artisan_profiles SET verified=$1 WHERE user_id=$2',[status==='auto_approved',r.artisan_id]);return json(res,200,{request:r})}return false}
+async function payments(req,res,url){
+ if(!url.pathname.startsWith('/api/payments/'))return false;
+ const u=await currentUser(req);if(!u)return deny(res,401,'Connexion requise');
+ if(u.role!=='artisan')return deny(res,403,'Réservé aux artisans');
+ const profile=(await q('SELECT stripe_account_id,stripe_onboarding_status FROM artisan_profiles WHERE user_id=$1',[u.id])).rows[0]||{};
+ if(req.method==='GET'&&url.pathname==='/api/payments/connect'){
+   return json(res,200,{configured:!!stripe,account_id:profile.stripe_account_id||null,status:profile.stripe_onboarding_status||'not_started'});
+ }
+ if(req.method==='POST'&&url.pathname==='/api/payments/connect/onboard'){
+   if(!stripe)return deny(res,503,'Le paiement sécurisé n’est pas encore configuré sur le serveur.');
+   let accountId=profile.stripe_account_id;
+   if(!accountId){
+     const account=await stripe.accounts.create({type:'express',country:'FR',email:u.email,capabilities:{card_payments:{requested:true},transfers:{requested:true}},business_type:'individual'});
+     accountId=account.id;
+     await q("UPDATE artisan_profiles SET stripe_account_id=$1,stripe_onboarding_status='pending' WHERE user_id=$2",[accountId,u.id]);
+   }
+   const origin=`https://${req.headers.host}`;
+   const link=await stripe.accountLinks.create({account:accountId,refresh_url:origin+'/artisan-profile.html?stripe=refresh',return_url:origin+'/artisan-profile.html?stripe=return',type:'account_onboarding'});
+   return json(res,200,{ok:true,url:link.url,status:'pending'});
+ }
+ return false;
+}
 async function geolocation(req,res,url){
  if(req.method!=='POST'||url.pathname!=='/api/geolocation')return false;
  const u=await currentUser(req);if(!u)return deny(res,401,'Connexion requise');
@@ -56,4 +81,4 @@ async function workflow(req,res,url){
 }
 function proxy(req,res){const headers={...req.headers,host:`127.0.0.1:${INTERNAL_PORT}`};const p=http.request({hostname:'127.0.0.1',port:INTERNAL_PORT,path:req.url,method:req.method,headers},r=>{res.writeHead(r.statusCode||502,r.headers);r.pipe(res)});p.on('error',()=>{if(!res.headersSent)json(res,502,{error:'Service indisponible'});else res.end()});req.pipe(p)}
 await initVerificationDb();await initQuoteDb();const child=spawn(process.execPath,['server.mjs'],{env:{...process.env,PORT:String(INTERNAL_PORT)},stdio:'inherit'});child.on('exit',code=>{console.error('Backend arrêté:',code);process.exit(code??1)});
-const server=http.createServer(async(req,res)=>{try{const url=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);if(url.pathname==='/api/geolocation'){const handled=await geolocation(req,res,url);if(handled!==false)return}if(url.pathname.match(/^\/api\/requests\/\d+\/accept$/)){const handled=await acceptRequest(req,res,url);if(handled!==false)return}if(url.pathname.match(/^\/api\/requests\/\d+\/quote(?:\/.*)?$/)){const handled=await quote(req,res,url);if(handled!==false)return}if(url.pathname.startsWith('/api/requests/')){const handled=await workflow(req,res,url);if(handled!==false)return}if(url.pathname.startsWith('/api/verification')||url.pathname.startsWith('/api/admin/verifications')){const handled=url.pathname.startsWith('/api/admin/verifications')?await admin(req,res,url):await verification(req,res,url);if(handled!==false)return}proxy(req,res)}catch(e){console.error(e);if(!res.headersSent)json(res,500,{error:'Erreur serveur'})}});server.listen(PUBLIC_PORT,'0.0.0.0',()=>console.log(`ARTISANDIRECT gateway ${PUBLIC_PORT}; backend ${INTERNAL_PORT}`));process.on('SIGTERM',()=>{child.kill('SIGTERM');server.close(()=>process.exit(0))});process.on('SIGINT',()=>{child.kill('SIGINT');server.close(()=>process.exit(0))});
+const server=http.createServer(async(req,res)=>{try{const url=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);if(url.pathname.startsWith('/api/payments/')){const handled=await payments(req,res,url);if(handled!==false)return}if(url.pathname==='/api/geolocation'){const handled=await geolocation(req,res,url);if(handled!==false)return}if(url.pathname.match(/^\/api\/requests\/\d+\/accept$/)){const handled=await acceptRequest(req,res,url);if(handled!==false)return}if(url.pathname.match(/^\/api\/requests\/\d+\/quote(?:\/.*)?$/)){const handled=await quote(req,res,url);if(handled!==false)return}if(url.pathname.startsWith('/api/requests/')){const handled=await workflow(req,res,url);if(handled!==false)return}if(url.pathname.startsWith('/api/verification')||url.pathname.startsWith('/api/admin/verifications')){const handled=url.pathname.startsWith('/api/admin/verifications')?await admin(req,res,url):await verification(req,res,url);if(handled!==false)return}proxy(req,res)}catch(e){console.error(e);if(!res.headersSent)json(res,500,{error:'Erreur serveur'})}});server.listen(PUBLIC_PORT,'0.0.0.0',()=>console.log(`ARTISANDIRECT gateway ${PUBLIC_PORT}; backend ${INTERNAL_PORT}`));process.on('SIGTERM',()=>{child.kill('SIGTERM');server.close(()=>process.exit(0))});process.on('SIGINT',()=>{child.kill('SIGINT');server.close(()=>process.exit(0))});
