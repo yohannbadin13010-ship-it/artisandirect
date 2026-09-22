@@ -42,14 +42,19 @@ async function payments(req,res,url){
  if(req.method==='POST'&&url.pathname==='/api/payments/connect/onboard'){
    if(!stripe)return deny(res,503,'Le paiement sécurisé n’est pas encore configuré sur le serveur.');
    let accountId=profile.stripe_account_id;
-   if(!accountId){
-     const account=await stripe.accounts.create({type:'express',country:'FR',email:u.email,capabilities:{card_payments:{requested:true},transfers:{requested:true}},business_type:'individual'});
-     accountId=account.id;
-     await q("UPDATE artisan_profiles SET stripe_account_id=$1,stripe_onboarding_status='pending' WHERE user_id=$2",[accountId,u.id]);
+   try{
+     if(!accountId){
+       const account=await stripe.accounts.create({type:'express',country:'FR',email:u.email,capabilities:{card_payments:{requested:true},transfers:{requested:true}},business_type:'individual'});
+       accountId=account.id;
+       await q("UPDATE artisan_profiles SET stripe_account_id=$1,stripe_onboarding_status='pending' WHERE user_id=$2",[accountId,u.id]);
+     }
+     const origin=`https://${req.headers.host}`;
+     const link=await stripe.accountLinks.create({account:accountId,refresh_url:origin+'/artisan-profile.html?stripe=refresh',return_url:origin+'/artisan-profile.html?stripe=return',type:'account_onboarding'});
+     return json(res,200,{ok:true,url:link.url,status:'pending'});
+   }catch(e){
+     console.error('STRIPE CONNECT ERROR', {type:e?.type,code:e?.code,statusCode:e?.statusCode,message:e?.message});
+     return deny(res,502,'Stripe : '+String(e?.message||'Erreur inconnue')+'.');
    }
-   const origin=`https://${req.headers.host}`;
-   const link=await stripe.accountLinks.create({account:accountId,refresh_url:origin+'/artisan-profile.html?stripe=refresh',return_url:origin+'/artisan-profile.html?stripe=return',type:'account_onboarding'});
-   return json(res,200,{ok:true,url:link.url,status:'pending'});
  }
  return false;
 }
