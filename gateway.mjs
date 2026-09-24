@@ -44,12 +44,12 @@ async function payments(req,res,url){
    let accountId=profile.stripe_account_id;
    try{
      if(!accountId){
-       const account=await stripe.accounts.create({type:'express',country:'FR',email:u.email,capabilities:{card_payments:{requested:true},transfers:{requested:true}},business_type:'individual'});
+       const account=await stripe.v2.core.accounts.create({contact_email:u.email,display_name:u.name||'Artisan',dashboard:'express',identity:{country:'FR',entity_type:'individual'},configuration:{recipient:{capabilities:{stripe_balance:{stripe_transfers:{requested:true}}}}},defaults:{responsibilities:{fees_collector:'application',losses_collector:'application'}}});
        accountId=account.id;
        await q("UPDATE artisan_profiles SET stripe_account_id=$1,stripe_onboarding_status='pending' WHERE user_id=$2",[accountId,u.id]);
      }
      const origin=`https://${req.headers.host}`;
-     const link=await stripe.accountLinks.create({account:accountId,refresh_url:origin+'/artisan-profile.html?stripe=refresh',return_url:origin+'/artisan-profile.html?stripe=return',type:'account_onboarding'});
+     const link=await stripe.v2.core.accountLinks.create({account:accountId,use_case:{type:'account_onboarding',account_onboarding:{configurations:['recipient'],refresh_url:origin+'/artisan-profile.html?stripe=refresh',return_url:origin+'/artisan-profile.html?stripe=return'}}});
      return json(res,200,{ok:true,url:link.url,status:'pending'});
    }catch(e){
      console.error('STRIPE CONNECT ERROR', {type:e?.type,code:e?.code,statusCode:e?.statusCode,message:e?.message});
