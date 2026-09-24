@@ -37,7 +37,21 @@ async function payments(req,res,url){
  if(u.role!=='artisan')return deny(res,403,'Réservé aux artisans');
  const profile=(await q('SELECT stripe_account_id,stripe_onboarding_status FROM artisan_profiles WHERE user_id=$1',[u.id])).rows[0]||{};
  if(req.method==='GET'&&url.pathname==='/api/payments/connect'){
-   return json(res,200,{configured:!!stripe,account_id:profile.stripe_account_id||null,status:profile.stripe_onboarding_status||'not_started'});
+   let status=profile.stripe_onboarding_status||'not_started';
+   let details=null;
+   if(stripe&&profile.stripe_account_id){
+     try{
+       const account=await stripe.v2.core.accounts.retrieve(profile.stripe_account_id);
+       const ready=!!account?.requirements?.summary?.minimum_deadline;
+       const currentlyDue=account?.requirements?.currently_due||[];
+       const pastDue=account?.requirements?.past_due||[];
+       const disabledReason=account?.requirements?.disabled_reason||null;
+       details={currently_due:currentlyDue,past_due:pastDue,disabled_reason:disabledReason};
+       status=(currentlyDue.length||pastDue.length||disabledReason)?'pending':'ready';
+       await q('UPDATE artisan_profiles SET stripe_onboarding_status=$1 WHERE user_id=$2',[status,u.id]);
+     }catch(e){console.error('STRIPE STATUS ERROR',e?.message)}
+   }
+   return json(res,200,{configured:!!stripe,account_id:profile.stripe_account_id||null,status,details});
  }
  if(req.method==='POST'&&url.pathname==='/api/payments/connect/onboard'){
    if(!stripe)return deny(res,503,'Le paiement sécurisé n’est pas encore configuré sur le serveur.');
