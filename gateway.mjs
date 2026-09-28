@@ -75,7 +75,7 @@ async function payments(req,res,url){
 async function checkoutPayment(req,res,url){
  if(url.pathname.startsWith('/api/payments/checkout/')||url.pathname.startsWith('/api/payments/status/')){
   const u=await currentUser(req);if(!u)return deny(res,401,'Connexion requise');
-  const m=url.pathname.match(/^\\/api\\/payments\\/(?:checkout|status)\\/(\\d+)$/);if(!m)return deny(res,400,'Demande invalide');
+  const m=url.pathname.match(/^\/api\/payments\/(?:checkout|status)\/(\d+)$/);if(!m)return deny(res,400,'Demande invalide');
   const id=Number(m[1]);
   const r=(await q('SELECT id,user_id,accepted_artisan_id,status,workflow_status,quote_amount_cents,quote_description,quote_status,payment_status,stripe_checkout_session_id,paid_at FROM requests WHERE id=$1',[id])).rows[0];
   if(!r)return deny(res,404,'Demande introuvable');
