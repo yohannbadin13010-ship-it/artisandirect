@@ -90,7 +90,7 @@ async function checkoutPayment(req,res,url){
   if(r.payment_status==='paid')return json(res,200,{ok:true,status:'paid',already_paid:true});
   const p=(await q('SELECT stripe_account_id,stripe_onboarding_status FROM artisan_profiles WHERE user_id=$1',[r.accepted_artisan_id])).rows[0]||{};
   if(!p.stripe_account_id||p.stripe_onboarding_status!=='ready')return deny(res,409,'Le compte de paiement de l’artisan n’est pas prêt.');
-  const amount=Number(r.quote_amount_cents),feePercent=Math.max(0,Math.min(30,Number(process.env.PLATFORM_FEE_PERCENT||0))),fee=Math.round(amount*feePercent/100);
+  const amount=Number(r.quote_amount_cents),feePercent=Math.max(0,Math.min(30,Number(process.env.PLATFORM_FEE_PERCENT||8))),fee=Math.round(amount*feePercent/100);
   try{
    const origin=`https://${req.headers.host}`;
    const session=await stripe.checkout.sessions.create({mode:'payment',line_items:[{price_data:{currency:'eur',product_data:{name:'Devis ARTISANDIRECT',description:'Demande #'+id},unit_amount:amount},quantity:1}],payment_intent_data:{application_fee_amount:fee,transfer_data:{destination:p.stripe_account_id},metadata:{request_id:String(id)}},customer_email:u.email,metadata:{request_id:String(id)},success_url:origin+'/devis.html?requestId='+encodeURIComponent(id)+'&payment=success&session_id={CHECKOUT_SESSION_ID}',cancel_url:origin+'/devis.html?requestId='+encodeURIComponent(id)+'&payment=cancel'});
