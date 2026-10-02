@@ -129,7 +129,7 @@ async function workflow(req,res,url){
 }
 
 async function dossier(req,res,url){
- const m=url.pathname.match(/^\/api\/requests\/(\\d+)\/dossier$/);
+ const m=url.pathname.match(/^\/api\/requests\/(\d+)\/dossier$/);
  if(!m||req.method!=='GET')return false;
  const u=await currentUser(req);if(!u)return deny(res,401,'Connexion requise');
  const id=Number(m[1]);
