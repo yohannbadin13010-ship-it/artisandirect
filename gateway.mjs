@@ -13,8 +13,48 @@ const stripe=STRIPE_SECRET_KEY?new Stripe(STRIPE_SECRET_KEY):null;
 const {Pool}=pg; const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_URL?.includes('supabase')?{rejectUnauthorized:false}:undefined}); const q=(text,params=[])=>pool.query(text,params);
 
 async function initVerificationDb(){await q(`CREATE TABLE IF NOT EXISTS artisan_verification_requests(id BIGSERIAL PRIMARY KEY,artisan_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','auto_approved','manual_review','rejected','needs_documents')),confidence NUMERIC(5,2) DEFAULT 0,identity_status TEXT NOT NULL DEFAULT 'not_submitted',business_status TEXT NOT NULL DEFAULT 'not_submitted',qualification_status TEXT NOT NULL DEFAULT 'not_submitted',insurance_status TEXT NOT NULL DEFAULT 'not_submitted',admin_note TEXT NOT NULL DEFAULT '',decision_reason TEXT NOT NULL DEFAULT '',submitted_at TIMESTAMPTZ DEFAULT now(),reviewed_at TIMESTAMPTZ,updated_at TIMESTAMPTZ DEFAULT now(),created_at TIMESTAMPTZ DEFAULT now())`);await q(`ALTER TABLE artisan_verification_requests ADD COLUMN IF NOT EXISTS decision_reason text NOT NULL DEFAULT ''`);await q(`ALTER TABLE artisan_verification_requests ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now()`);await q(`CREATE INDEX IF NOT EXISTS artisan_verification_requests_status_idx ON artisan_verification_requests(status)`);await q(`CREATE INDEX IF NOT EXISTS artisan_verification_requests_artisan_idx ON artisan_verification_requests(artisan_id)`)}
-async function initInvoiceDb(){await q(`ALTER TABLE public.requests ADD COLUMN IF NOT EXISTS location_address TEXT DEFAULT ''`);await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS business_address TEXT DEFAULT ''`);await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS siret TEXT DEFAULT ''`);await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS vat_number TEXT DEFAULT ''`);await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS legal_form TEXT DEFAULT 'EI'`);await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS capital_social TEXT DEFAULT ''`);await q(`CREATE TABLE IF NOT EXISTS invoices(id BIGSERIAL PRIMARY KEY,request_id BIGINT NOT NULL UNIQUE REFERENCES requests(id) ON DELETE CASCADE,artisan_id BIGINT NOT NULL REFERENCES users(id),invoice_number TEXT NOT NULL UNIQUE,invoice_year INTEGER NOT NULL,sequence_number INTEGER NOT NULL,seller_name TEXT NOT NULL,seller_address TEXT NOT NULL DEFAULT '',seller_siret TEXT NOT NULL DEFAULT '',seller_vat_number TEXT NOT NULL DEFAULT '',seller_legal_form TEXT NOT NULL DEFAULT 'EI',seller_capital_social TEXT NOT NULL DEFAULT '',client_name TEXT NOT NULL,client_address TEXT NOT NULL DEFAULT '',service_date TIMESTAMPTZ,issued_at TIMESTAMPTZ NOT NULL DEFAULT now(),payment_date TIMESTAMPTZ,lines JSONB NOT NULL DEFAULT '[]'::jsonb,total_ht_cents INTEGER NOT NULL DEFAULT 0,total_vat_cents INTEGER NOT NULL DEFAULT 0,total_ttc_cents INTEGER NOT NULL DEFAULT 0,payment_status TEXT NOT NULL DEFAULT 'paid',status TEXT NOT NULL DEFAULT 'draft_incomplete',created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);await q(`ALTER TABLE public.invoices ADD COLUMN IF NOT EXISTS seller_capital_social TEXT NOT NULL DEFAULT ''`);await q(`CREATE TABLE IF NOT EXISTS invoice_sequences(artisan_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,invoice_year INTEGER NOT NULL,last_number INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(artisan_id,invoice_year))`);await q(`CREATE INDEX IF NOT EXISTS invoices_artisan_idx ON invoices(artisan_id,issued_at DESC)`)}
-async function initQuoteDb(){await q(`ALTER TABLE artisan_profiles ADD COLUMN IF NOT EXISTS stripe_account_id TEXT`);await q(`ALTER TABLE artisan_profiles ADD COLUMN IF NOT EXISTS stripe_onboarding_status TEXT DEFAULT 'not_started'`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_amount_cents INTEGER`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_description TEXT DEFAULT ''`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_status TEXT DEFAULT 'none'`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_created_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_expires_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_accepted_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_declined_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'none'`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS stripe_checkout_session_id TEXT`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`)}
+async function initInvoiceDb(){
+ await q(`ALTER TABLE public.requests ADD COLUMN IF NOT EXISTS location_address TEXT DEFAULT ''`);
+ await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS business_address TEXT DEFAULT ''`);
+ await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS siret TEXT DEFAULT ''`);
+ await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS vat_number TEXT DEFAULT ''`);
+ await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS legal_form TEXT DEFAULT 'EI'`);
+ await q(`ALTER TABLE public.artisan_profiles ADD COLUMN IF NOT EXISTS capital_social TEXT DEFAULT ''`);
+ await q(`CREATE TABLE IF NOT EXISTS invoices(
+  id BIGSERIAL PRIMARY KEY,
+  request_id BIGINT NOT NULL UNIQUE REFERENCES requests(id) ON DELETE CASCADE,
+  artisan_id BIGINT NOT NULL REFERENCES users(id),
+  invoice_number TEXT NOT NULL UNIQUE,
+  invoice_year INTEGER NOT NULL,
+  sequence_number INTEGER NOT NULL,
+  seller_name TEXT NOT NULL,
+  seller_address TEXT NOT NULL DEFAULT '',
+  seller_siret TEXT NOT NULL DEFAULT '',
+  seller_vat_number TEXT NOT NULL DEFAULT '',
+  seller_legal_form TEXT NOT NULL DEFAULT 'EI',
+  seller_capital_social TEXT NOT NULL DEFAULT '',
+  client_name TEXT NOT NULL,
+  client_address TEXT NOT NULL DEFAULT '',
+  service_date TIMESTAMPTZ,
+  issued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  payment_date TIMESTAMPTZ,
+  lines JSONB NOT NULL DEFAULT '[]'::jsonb,
+  total_ht_cents INTEGER NOT NULL DEFAULT 0,
+  total_vat_cents INTEGER NOT NULL DEFAULT 0,
+  total_ttc_cents INTEGER NOT NULL DEFAULT 0,
+  payment_status TEXT NOT NULL DEFAULT 'paid',
+  status TEXT NOT NULL DEFAULT 'draft_incomplete',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+ )`);
+ await q(`ALTER TABLE public.invoices ADD COLUMN IF NOT EXISTS seller_capital_social TEXT NOT NULL DEFAULT ''`);
+ await q(`CREATE TABLE IF NOT EXISTS invoice_sequences(
+  artisan_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  invoice_year INTEGER NOT NULL,
+  last_number INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(artisan_id,invoice_year)
+ )`);
+ await q(`CREATE INDEX IF NOT EXISTS invoices_artisan_idx ON invoices(artisan_id,issued_at DESC)`);
+}
 function cookie(req,name){const raw=req.headers.cookie||'';const m=raw.match(new RegExp('(?:^|;\\s*)'+name.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')+'=([^;]*)'));return m?decodeURIComponent(m[1]):''}
 function userFromRequest(req){try{const t=cookie(req,'ad_token');return t?jwt.verify(t,JWT_SECRET):null}catch{return null}}
 async function currentUser(req){const t=userFromRequest(req);if(!t?.id)return null;return (await q('SELECT id,role,name,email FROM users WHERE id=$1',[t.id])).rows[0]||null}
