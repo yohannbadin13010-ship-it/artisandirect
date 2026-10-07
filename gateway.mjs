@@ -55,6 +55,7 @@ async function initInvoiceDb(){
  )`);
  await q(`CREATE INDEX IF NOT EXISTS invoices_artisan_idx ON invoices(artisan_id,issued_at DESC)`);
 }
+async function initQuoteDb(){await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_amount_cents INTEGER`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_description TEXT DEFAULT ''`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_status TEXT DEFAULT 'none'`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_created_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_expires_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_accepted_at TIMESTAMPTZ`);await q(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS quote_declined_at TIMESTAMPTZ`)}
 function cookie(req,name){const raw=req.headers.cookie||'';const m=raw.match(new RegExp('(?:^|;\\s*)'+name.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')+'=([^;]*)'));return m?decodeURIComponent(m[1]):''}
 function userFromRequest(req){try{const t=cookie(req,'ad_token');return t?jwt.verify(t,JWT_SECRET):null}catch{return null}}
 async function currentUser(req){const t=userFromRequest(req);if(!t?.id)return null;return (await q('SELECT id,role,name,email FROM users WHERE id=$1',[t.id])).rows[0]||null}
